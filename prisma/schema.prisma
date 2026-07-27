@@ -1,5 +1,8 @@
 generator client {
   provider = "prisma-client-js"
+  // node:20-alpine ships OpenSSL 3.x; sin esto Prisma intenta autodetectarlo en runtime y falla
+  // con "Could not parse schema engine response" en Render/Docker Alpine (ver deploy logs).
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {
