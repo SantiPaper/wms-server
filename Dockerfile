@@ -1,5 +1,8 @@
 FROM node:20-alpine AS build
 WORKDIR /app
+# Prisma (query engine y schema/migration engine) enlaza contra libssl en tiempo real — Alpine
+# no la trae por default y sin ella los binarios de Prisma fallan al arrancar.
+RUN apk add --no-cache openssl
 COPY package.json package-lock.json* ./
 RUN npm install
 COPY . .
@@ -8,6 +11,7 @@ RUN npm run build
 
 FROM node:20-alpine AS runtime
 WORKDIR /app
+RUN apk add --no-cache openssl
 ENV NODE_ENV=production
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev
