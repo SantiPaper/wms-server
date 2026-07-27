@@ -1,0 +1,342 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  SUPERVISOR
+  OPERARIO
+}
+
+enum ZoneType {
+  RECEIVING
+  STORAGE_RESERVE
+  PICKING_ACTIVE
+  CROSS_DOCK
+  STAGING_OUT
+  QUARANTINE
+}
+
+enum LpnStatus {
+  IN_STOCK
+  IN_TRANSIT
+  SHIPPED
+}
+
+enum InventoryStatus {
+  AVAILABLE
+  QUARANTINE
+  DAMAGED
+  DISCREPANCY
+}
+
+enum RotationClass {
+  A
+  B
+  C
+}
+
+enum InboundOrderStatus {
+  EXPECTED
+  IN_RECEIVING
+  COMPLETED
+}
+
+enum ReceptionEventKind {
+  GOOD
+  DAMAGED
+  EXCESS
+}
+
+enum ReceptionEventStatus {
+  COMMITTED
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+}
+
+enum OutboundOrderStatus {
+  CREATED
+  ALLOCATED
+  IN_PICKING
+  PACKED
+  SHIPPED
+}
+
+enum OutboundOrderPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum PickingTaskStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  SHORTAGE
+}
+
+model User {
+  id               Int      @id @default(autoincrement())
+  email            String   @unique
+  passwordHash     String
+  role             Role     @default(OPERARIO)
+  isActive         Boolean  @default(true)
+  refreshTokenHash String?
+  createdAt        DateTime @default(now())
+
+  scannedEvents  ReceptionEvent[] @relation("ScannedBy")
+  approvedEvents ReceptionEvent[] @relation("ApprovedBy")
+  releasedWaves  PickingWave[]    @relation("WaveReleasedBy")
+  assignedTasks  PickingTask[]    @relation("TaskAssignedTo")
+
+  @@map("users")
+}
+
+model Product {
+  id                 Int           @id @default(autoincrement())
+  sku                String        @unique
+  barcode            String        @unique
+  description        String
+  unitOfMeasure      String        @default("UNI")
+  requiresBatch      Boolean       @default(false)
+  requiresExpiration Boolean       @default(false)
+  rotationClass      RotationClass @default(B)
+  weightKg           Decimal?      @db.Decimal(10, 2)
+  createdAt          DateTime      @default(now())
+
+  inventory          Inventory[]
+  inboundOrderItems  InboundOrderItem[]
+  outboundOrderItems OutboundOrderItem[]
+  pickingTasks       PickingTask[]
+
+  @@map("products")
+}
+
+model Location {
+  id           Int      @id @default(autoincrement())
+  locationCode String   @unique
+  zoneType     ZoneType
+  maxWeightKg  Decimal? @db.Decimal(10, 2)
+  isBlocked    Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  lpns            Lpn[]
+  inventory       Inventory[]
+  receptionEvents ReceptionEvent[]
+  pickingTasks    PickingTask[]
+
+  @@index([zoneType, isBlocked])
+  @@map("locations")
+}
+
+model Lpn {
+  id                Int       @id @default(autoincrement())
+  lpnCode           String    @unique
+  currentLocationId Int?
+  currentLocation   Location? @relation(fields: [currentLocationId], references: [id], onDelete: Restrict)
+  status            LpnStatus @default(IN_STOCK)
+  updatedAt         DateTime  @updatedAt
+
+  inventory       Inventory[]
+  receptionEvents ReceptionEvent[]
+
+  @@index([currentLocationId])
+  @@map("lpns")
+}
+
+model Inventory {
+  id                Int             @id @default(autoincrement())
+  productId         Int
+  product           Product         @relation(fields: [productId], references: [id], onDelete: Restrict)
+  locationId        Int
+  location          Location        @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  lpnId             Int?
+  lpn               Lpn?            @relation(fields: [lpnId], references: [id], onDelete: Restrict)
+  batchNumber       String?
+  expirationDate    DateTime?       @db.Date
+  quantity          Int
+  allocatedQuantity Int             @default(0)
+  status            InventoryStatus @default(AVAILABLE)
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  pickingTasks PickingTask[]
+
+  @@index([productId, status])
+  @@index([productId, expirationDate])
+  @@index([productId, createdAt])
+  @@index([locationId])
+  @@index([lpnId])
+  @@map("inventory")
+}
+
+model InboundOrder {
+  id           Int                @id @default(autoincrement())
+  supplierCode String
+  externalId   String             @unique
+  status       InboundOrderStatus @default(EXPECTED)
+  createdAt    DateTime           @default(now())
+  completedAt  DateTime?
+
+  items InboundOrderItem[]
+
+  @@index([status])
+  @@map("inbound_orders")
+}
+
+model InboundOrderItem {
+  id               Int          @id @default(autoincrement())
+  inboundOrderId   Int
+  inboundOrder     InboundOrder @relation(fields: [inboundOrderId], references: [id], onDelete: Cascade)
+  productId        Int
+  product          Product      @relation(fields: [productId], references: [id], onDelete: Restrict)
+  expectedQuantity Int
+  receivedQuantity Int          @default(0)
+  damagedQuantity  Int          @default(0)
+
+  receptionEvents ReceptionEvent[]
+
+  @@unique([inboundOrderId, productId])
+  @@map("inbound_order_items")
+}
+
+model ReceptionEvent {
+  id                 Int                  @id @default(autoincrement())
+  inboundOrderItemId Int
+  inboundOrderItem   InboundOrderItem     @relation(fields: [inboundOrderItemId], references: [id], onDelete: Cascade)
+  lpnId              Int
+  lpn                Lpn                  @relation(fields: [lpnId], references: [id], onDelete: Restrict)
+  locationId         Int
+  location           Location             @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  quantity           Int
+  kind               ReceptionEventKind
+  batchNumber        String?
+  expirationDate     DateTime?            @db.Date
+  status             ReceptionEventStatus @default(COMMITTED)
+  scannedByUserId    Int?
+  scannedBy          User?                @relation("ScannedBy", fields: [scannedByUserId], references: [id], onDelete: SetNull)
+  approvedByUserId   Int?
+  approvedBy         User?                @relation("ApprovedBy", fields: [approvedByUserId], references: [id], onDelete: SetNull)
+  approvedAt         DateTime?
+  notes              String?
+  createdAt          DateTime             @default(now())
+
+  @@index([inboundOrderItemId, status])
+  @@map("reception_events")
+}
+
+model OutboundOrder {
+  id              Int                   @id @default(autoincrement())
+  orderNumber     String                @unique
+  customerName    String?
+  shippingAddress String?
+  priority        OutboundOrderPriority @default(MEDIUM)
+  status          OutboundOrderStatus   @default(CREATED)
+  waveId          Int?
+  wave            PickingWave?          @relation(fields: [waveId], references: [id], onDelete: Restrict)
+  trackingNumber  String?
+  createdAt       DateTime              @default(now())
+  allocatedAt     DateTime?
+  packedAt        DateTime?
+  shippedAt       DateTime?
+
+  items        OutboundOrderItem[]
+  pickingTasks PickingTask[]
+
+  @@index([status])
+  @@index([waveId])
+  @@map("outbound_orders")
+}
+
+model OutboundOrderItem {
+  id                Int           @id @default(autoincrement())
+  outboundOrderId   Int
+  outboundOrder     OutboundOrder @relation(fields: [outboundOrderId], references: [id], onDelete: Cascade)
+  productId         Int
+  product           Product       @relation(fields: [productId], references: [id], onDelete: Restrict)
+  orderedQuantity   Int
+  allocatedQuantity Int           @default(0)
+  pickedQuantity    Int           @default(0)
+  shortedQuantity   Int           @default(0)
+
+  pickingTasks PickingTask[]
+
+  @@unique([outboundOrderId, productId])
+  @@map("outbound_order_items")
+}
+
+model PickingWave {
+  id               Int      @id @default(autoincrement())
+  releasedByUserId Int?
+  releasedBy       User?    @relation("WaveReleasedBy", fields: [releasedByUserId], references: [id], onDelete: SetNull)
+  createdAt        DateTime @default(now())
+
+  orders OutboundOrder[]
+  tasks  PickingTask[]
+
+  @@map("picking_waves")
+}
+
+model PickingTask {
+  id                  Int               @id @default(autoincrement())
+  outboundOrderId     Int
+  outboundOrder       OutboundOrder     @relation(fields: [outboundOrderId], references: [id], onDelete: Cascade)
+  outboundOrderItemId Int
+  outboundOrderItem   OutboundOrderItem @relation(fields: [outboundOrderItemId], references: [id], onDelete: Cascade)
+  waveId              Int
+  wave                PickingWave       @relation(fields: [waveId], references: [id], onDelete: Restrict)
+  productId           Int
+  product             Product           @relation(fields: [productId], references: [id], onDelete: Restrict)
+  fromLocationId      Int
+  fromLocation        Location          @relation(fields: [fromLocationId], references: [id], onDelete: Restrict)
+  inventoryId         Int
+  inventory           Inventory         @relation(fields: [inventoryId], references: [id], onDelete: Restrict)
+  batchNumber         String?
+  expirationDate      DateTime?         @db.Date
+  requiredQuantity    Int
+  pickedQuantity      Int               @default(0)
+  routeSequence       Int
+  status              PickingTaskStatus @default(PENDING)
+  rerouteOfTaskId     Int?
+  rerouteOfTask       PickingTask?      @relation("TaskReroute", fields: [rerouteOfTaskId], references: [id], onDelete: SetNull)
+  reroutedTasks       PickingTask[]     @relation("TaskReroute")
+  assignedUserId      Int?
+  assignedUser        User?             @relation("TaskAssignedTo", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  createdAt           DateTime          @default(now())
+  completedAt         DateTime?
+
+  @@index([outboundOrderId])
+  @@index([waveId, routeSequence])
+  @@index([status])
+  @@index([fromLocationId])
+  @@index([status, assignedUserId])
+  @@map("picking_tasks")
+}
+
+enum WebhookDeliveryStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+model WebhookDelivery {
+  id          Int                   @id @default(autoincrement())
+  event       String
+  payload     Json
+  status      WebhookDeliveryStatus @default(PENDING)
+  attempts    Int                   @default(0)
+  lastError   String?
+  createdAt   DateTime              @default(now())
+  sentAt      DateTime?
+
+  @@index([status])
+  @@index([event])
+  @@map("webhook_deliveries")
+}
