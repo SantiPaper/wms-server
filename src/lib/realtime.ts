@@ -5,10 +5,14 @@ import { logger } from '@/lib/logger';
 import { verifyAccessToken } from '@/modules/auth/token.util';
 
 const WS_PATH = '/ws';
-const PING_INTERVAL_MS = 30_000;
+const HEARTBEAT_INTERVAL_MS = 20_000;
+
+interface HeartbeatWebSocket extends WebSocket {
+  isAlive?: boolean;
+}
 
 let wss: WebSocketServer | null = null;
-const clients = new Set<WebSocket>();
+const clients = new Set<HeartbeatWebSocket>();
 
 function parseCookies(header: string | undefined): Record<string, string> {
   const out: Record<string, string> = {};
@@ -57,18 +61,38 @@ export function initRealtime(server: HttpServer) {
     });
   });
 
-  wss.on('connection', (ws: WebSocket) => {
+  wss.on('connection', (ws: HeartbeatWebSocket) => {
+    ws.isAlive = true;
     clients.add(ws);
+    ws.on('pong', () => {
+      ws.isAlive = true;
+    });
     ws.on('close', () => clients.delete(ws));
     ws.on('error', () => clients.delete(ws));
   });
 
-  const pingInterval = setInterval(() => {
+  // El ping/pong de WebSocket es a nivel de protocolo — el navegador lo responde solo, sin que
+  // el JS de la página se entere. Si el proceso muere sin cerrar la conexión prolijo (ej. Render
+  // reiniciando el contenedor por inactividad), el cliente puede quedar con un socket "zombie":
+  // cree que sigue conectado y nunca dispara su lógica de reconexión. Por eso además del ping de
+  // protocolo (que detecta y limpia clientes muertos de este lado) mandamos un mensaje de datos
+  // real — el único tipo de evento que el navegador expone a onmessage — para que el cliente
+  // pueda notar cuánto hace que no recibe nada y reconectar por las suyas si hace falta.
+  const heartbeatInterval = setInterval(() => {
     for (const ws of clients) {
-      if (ws.readyState === WebSocket.OPEN) ws.ping();
+      if (ws.isAlive === false) {
+        ws.terminate();
+        clients.delete(ws);
+        continue;
+      }
+      ws.isAlive = false;
+      ws.ping();
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ event: 'heartbeat', payload: {}, ts: Date.now() }));
+      }
     }
-  }, PING_INTERVAL_MS);
-  server.on('close', () => clearInterval(pingInterval));
+  }, HEARTBEAT_INTERVAL_MS);
+  server.on('close', () => clearInterval(heartbeatInterval));
 
   logger.info(`WebSocket de tiempo real listo en ${WS_PATH}`);
 }
